@@ -5,19 +5,33 @@ const fetch = require('node-fetch');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Middleware
 app.use(cors());
 app.use(express.json());
 
+// ==================== CUSTOMER DATABASE ====================
+// Her müşteri için ayrı key ve limit
 const CUSTOMERS = {
     'dvdcoin-demo': {
         name: 'DVD Coin (Demo)',
         limit: 10000,
         used: 0,
         active: true,
-        knowledge: ''
+        knowledge: '', // ← COMPANY KNOWLEDGE (PDF/TXT içeriği)
+        searchApiKey: '' // ← REAL-TIME SEARCH API KEY (Opsiyonel)
+    },
+    'customer-test': {
+        name: 'Test Customer',
+        limit: 1000,
+        used: 0,
+        active: true,
+        knowledge: '',
+        searchApiKey: ''
     }
+    // Buraya yeni müşteriler ekleyebilirsin
 };
 
+// ==================== CUSTOMER CHECK MIDDLEWARE ====================
 function checkCustomer(req, res, next) {
     const customerKey = req.body.customerKey || req.headers['x-customer-key'];
     
@@ -36,7 +50,7 @@ function checkCustomer(req, res, next) {
     }
     
     if (customer.used >= customer.limit) {
-        return res.status(429).json({ error: 'Monthly limit exceeded' });
+        return res.status(429).json({ error: 'Monthly limit exceeded. Please upgrade your plan.' });
     }
     
     req.customer = customer;
@@ -44,16 +58,22 @@ function checkCustomer(req, res, next) {
     next();
 }
 
+// ==================== CHAT ENDPOINT ====================
 app.post('/api/chat', checkCustomer, async (req, res) => {
     try {
         const { messages } = req.body;
         
+        console.log(`[${req.customerKey}] Chat request - Messages: ${messages.length}`);
+        
+        // Müşterinin knowledge'ını ekle (varsa)
         let messagesWithKnowledge = [...messages];
         if (req.customer.knowledge && req.customer.knowledge.trim()) {
+            // System prompt'tan sonra, user mesajlarından önce knowledge ekle
             messagesWithKnowledge.splice(1, 0, {
                 role: 'system',
-                content: `IMPORTANT COMPANY KNOWLEDGE:\n\n${req.customer.knowledge}`
+                content: `IMPORTANT COMPANY KNOWLEDGE - Use this to answer questions:\n\n${req.customer.knowledge}`
             });
+            console.log(`[${req.customerKey}] Added knowledge (${req.customer.knowledge.length} chars)`);
         }
         
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -70,54 +90,91 @@ app.post('/api/chat', checkCustomer, async (req, res) => {
             })
         });
         
+        if (!response.ok) {
+            throw new Error('OpenAI API error');
+        }
+        
         const result = await response.json();
+        
+        // Kullanımı kaydet
         CUSTOMERS[req.customerKey].used++;
         
+        console.log(`[${req.customerKey}] Chat success - Usage: ${CUSTOMERS[req.customerKey].used}/${CUSTOMERS[req.customerKey].limit}`);
+        
         res.json(result);
+        
     } catch (error) {
+        console.error('Chat error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
+// ==================== TTS ENDPOINT ====================
 app.post('/api/tts', checkCustomer, async (req, res) => {
     try {
         const { input, voice, audioConfig } = req.body;
+        
+        console.log(`[${req.customerKey}] TTS request`);
         
         const response = await fetch(
             `https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GOOGLE_TTS_KEY}`,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ input, voice, audioConfig })
+                body: JSON.stringify({
+                    input: input,
+                    voice: voice,
+                    audioConfig: audioConfig
+                })
             }
         );
         
+        if (!response.ok) {
+            throw new Error('Google TTS API error');
+        }
+        
         const result = await response.json();
+        
+        console.log(`[${req.customerKey}] TTS success`);
+        
         res.json(result);
+        
     } catch (error) {
+        console.error('TTS error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
+// ==================== UPLOAD KNOWLEDGE ENDPOINT ====================
 app.post('/api/upload-knowledge', checkCustomer, async (req, res) => {
     try {
         const { knowledge, adminPassword } = req.body;
         
+        // Admin password kontrolü (her müşteri kendi widget password'ünü kullanır)
         if (!adminPassword) {
             return res.status(401).json({ error: 'Admin password required' });
         }
         
+        console.log(`[${req.customerKey}] Knowledge upload request - ${knowledge.length} chars`);
+        
+        // Knowledge'ı kaydet
         CUSTOMERS[req.customerKey].knowledge = knowledge;
         
+        console.log(`[${req.customerKey}] Knowledge updated successfully`);
+        
         res.json({ 
-            success: true,
+            success: true, 
+            message: 'Knowledge uploaded successfully',
             knowledgeLength: knowledge.length
         });
+        
     } catch (error) {
+        console.error('Upload error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
+// ==================== GET KNOWLEDGE ENDPOINT ====================
 app.get('/api/get-knowledge', checkCustomer, async (req, res) => {
     try {
         res.json({ 
@@ -125,17 +182,84 @@ app.get('/api/get-knowledge', checkCustomer, async (req, res) => {
             knowledgeLength: (CUSTOMERS[req.customerKey].knowledge || '').length
         });
     } catch (error) {
+        console.error('Get knowledge error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'OK',
-        timestamp: new Date().toISOString()
+// ==================== UPDATE SEARCH API KEY ENDPOINT ====================
+app.post('/api/update-search-key', checkCustomer, async (req, res) => {
+    try {
+        const { searchApiKey, adminPassword } = req.body;
+        
+        // Admin password kontrolü
+        if (!adminPassword) {
+            return res.status(401).json({ error: 'Admin password required' });
+        }
+        
+        console.log(`[${req.customerKey}] Search API key update request`);
+        
+        // API key'i kaydet
+        CUSTOMERS[req.customerKey].searchApiKey = searchApiKey || '';
+        
+        console.log(`[${req.customerKey}] Search API key updated`);
+        
+        res.json({ 
+            success: true, 
+            message: 'Search API key updated successfully',
+            hasKey: !!searchApiKey
+        });
+        
+    } catch (error) {
+        console.error('Update search key error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// ==================== GET SEARCH API KEY ENDPOINT ====================
+app.get('/api/get-search-key', checkCustomer, async (req, res) => {
+    try {
+        res.json({ 
+            hasKey: !!CUSTOMERS[req.customerKey].searchApiKey,
+            keyPreview: CUSTOMERS[req.customerKey].searchApiKey ? 
+                CUSTOMERS[req.customerKey].searchApiKey.substring(0, 10) + '...' : 
+                'Not set'
+        });
+    } catch (error) {
+        console.error('Get search key error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// ==================== USAGE STATS ENDPOINT ====================
+app.get('/api/stats/:customerKey', (req, res) => {
+    const customer = CUSTOMERS[req.params.customerKey];
+    
+    if (!customer) {
+        return res.status(404).json({ error: 'Customer not found' });
+    }
+    
+    res.json({
+        name: customer.name,
+        used: customer.used,
+        limit: customer.limit,
+        remaining: customer.limit - customer.used,
+        active: customer.active
     });
 });
 
+// ==================== HEALTH CHECK ====================
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'OK',
+        timestamp: new Date().toISOString(),
+        customers: Object.keys(CUSTOMERS).length
+    });
+});
+
+// ==================== START SERVER ====================
 app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🚀 Widget API Server running on port ${PORT}`);
+    console.log(`📊 Active customers: ${Object.keys(CUSTOMERS).length}`);
+    console.log(`✅ Ready to serve requests!`);
 });
