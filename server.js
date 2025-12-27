@@ -11,6 +11,10 @@ app.use(express.json());
 
 // ==================== CUSTOMER DATABASE ====================
 // Her müşteri için ayrı key ve limit
+// searchApiKey'i Railway'den eklemek için:
+// 1. CUSTOMERS objesi içinde ilgili customer'ın searchApiKey'ini güncelle
+// 2. Deploy et
+// Örnek: 'dvdcoin-demo': { ..., searchApiKey: 'your-api-key-here' }
 const CUSTOMERS = {
     'dvdcoin-demo': {
         name: 'DVD Coin (Demo)',
@@ -18,7 +22,7 @@ const CUSTOMERS = {
         used: 0,
         active: true,
         knowledge: '', // ← COMPANY KNOWLEDGE (PDF/TXT içeriği)
-        searchApiKey: '' // ← REAL-TIME SEARCH API KEY (Opsiyonel)
+        searchApiKey: '' // ← REAL-TIME SEARCH API KEY (Railway'den ekle)
     },
     'customer-test': {
         name: 'Test Customer',
@@ -187,46 +191,31 @@ app.get('/api/get-knowledge', checkCustomer, async (req, res) => {
     }
 });
 
-// ==================== UPDATE SEARCH API KEY ENDPOINT ====================
-app.post('/api/update-search-key', checkCustomer, async (req, res) => {
+// ==================== WEB SEARCH ENDPOINT ====================
+app.post('/api/search', checkCustomer, async (req, res) => {
     try {
-        const { searchApiKey, adminPassword } = req.body;
+        const { query } = req.body;
         
-        // Admin password kontrolü
-        if (!adminPassword) {
-            return res.status(401).json({ error: 'Admin password required' });
+        // Check if customer has search API key
+        if (!req.customer.searchApiKey || req.customer.searchApiKey.trim() === '') {
+            return res.status(400).json({ 
+                error: 'Real-time search is not available. Please add a search API key to your Railway configuration.',
+                available: false
+            });
         }
         
-        console.log(`[${req.customerKey}] Search API key update request`);
+        console.log(`[${req.customerKey}] Search request: ${query}`);
         
-        // API key'i kaydet
-        CUSTOMERS[req.customerKey].searchApiKey = searchApiKey || '';
-        
-        console.log(`[${req.customerKey}] Search API key updated`);
-        
-        res.json({ 
-            success: true, 
-            message: 'Search API key updated successfully',
-            hasKey: !!searchApiKey
+        // Example: Brave Search API (you can replace with any search API)
+        // For now, just return a message
+        res.json({
+            available: true,
+            message: 'Search feature is configured. Add your preferred search API implementation here.',
+            query: query
         });
         
     } catch (error) {
-        console.error('Update search key error:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// ==================== GET SEARCH API KEY ENDPOINT ====================
-app.get('/api/get-search-key', checkCustomer, async (req, res) => {
-    try {
-        res.json({ 
-            hasKey: !!CUSTOMERS[req.customerKey].searchApiKey,
-            keyPreview: CUSTOMERS[req.customerKey].searchApiKey ? 
-                CUSTOMERS[req.customerKey].searchApiKey.substring(0, 10) + '...' : 
-                'Not set'
-        });
-    } catch (error) {
-        console.error('Get search key error:', error);
+        console.error('Search error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
