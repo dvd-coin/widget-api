@@ -26,6 +26,7 @@ app.options('*', cors());
 const CUSTOMERS = {
     'dvdcoin-demo': {
         name: 'DVD Coin (Demo)',
+        allowedDomain: 'dvdcoin.io',
         limit: 10000,
         used: 0,
         active: true,
@@ -34,6 +35,7 @@ const CUSTOMERS = {
     },
     'customer-test': {
         name: 'Test Customer',
+        allowedDomain: 'localhost',
         limit: 1000,
         used: 0,
         active: true,
@@ -66,6 +68,40 @@ function checkCustomer(req, res, next) {
     }
     
     req.customer = customer;
+    
+    // ==================== DOMAIN CHECK ====================
+    if (customer.allowedDomain) {
+        const origin = req.headers.origin || req.headers.referer || '';
+        let requestDomain = '';
+        
+        try {
+            if (origin) {
+                const url = new URL(origin);
+                requestDomain = url.hostname;
+            }
+        } catch (e) {
+            console.log('Could not parse origin');
+        }
+        
+        // Check domain
+        const allowed = customer.allowedDomain;
+        const isAllowed = requestDomain === allowed || 
+                         requestDomain === 'www.' + allowed ||
+                         requestDomain.endsWith('.' + allowed) ||
+                         (allowed === 'localhost' && (requestDomain === 'localhost' || requestDomain === '127.0.0.1'));
+        
+        if (!isAllowed && requestDomain !== '') {
+            console.log(`[${customerKey}] ❌ Domain not allowed: ${requestDomain}`);
+            console.log(`[${customerKey}] ✅ Allowed domain: ${allowed}`);
+            return res.status(403).json({ 
+                error: 'Domain not authorized',
+                domain: requestDomain
+            });
+        }
+        
+        console.log(`[${customerKey}] ✅ Domain authorized: ${requestDomain}`);
+    }
+
     req.customerKey = customerKey;
     next();
 }
