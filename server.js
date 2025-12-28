@@ -162,7 +162,13 @@ app.post('/api/tts', checkCustomer, async (req, res) => {
     try {
         const { input, voice, audioConfig } = req.body;
         
-        console.log(`[${req.customerKey}] TTS request`);
+        console.log(`[${req.customerKey}] TTS request - Voice:`, voice?.name);
+        
+        // Check if Google TTS key exists
+        if (!process.env.GOOGLE_TTS_KEY) {
+            console.error('GOOGLE_TTS_KEY not set in environment!');
+            return res.status(500).json({ error: 'TTS service not configured' });
+        }
         
         const response = await fetch(
             `https://texttospeech.googleapis.com/v1/text:synthesize?key=${process.env.GOOGLE_TTS_KEY}`,
@@ -178,7 +184,12 @@ app.post('/api/tts', checkCustomer, async (req, res) => {
         );
         
         if (!response.ok) {
-            throw new Error('Google TTS API error');
+            const errorData = await response.text();
+            console.error(`[${req.customerKey}] Google TTS API error:`, response.status, errorData);
+            return res.status(500).json({ 
+                error: 'Google TTS API error',
+                details: errorData
+            });
         }
         
         const result = await response.json();
@@ -188,8 +199,8 @@ app.post('/api/tts', checkCustomer, async (req, res) => {
         res.json(result);
         
     } catch (error) {
-        console.error('TTS error:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error(`[${req.customerKey}] TTS error:`, error.message);
+        res.status(500).json({ error: 'Internal server error', message: error.message });
     }
 });
 
