@@ -281,10 +281,24 @@ app.post('/api/upload-knowledge', checkCustomer, async (req, res) => {
         
         console.log(`[${req.customerKey}] Knowledge upload request - ${knowledge.length} chars`);
         
+        // Clean the knowledge text (remove NULL bytes and invalid UTF-8)
+        let cleanedKnowledge = knowledge;
+        
+        // Remove NULL bytes (0x00)
+        cleanedKnowledge = cleanedKnowledge.replace(/\0/g, '');
+        
+        // Remove other problematic characters
+        cleanedKnowledge = cleanedKnowledge.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+        
+        // Trim whitespace
+        cleanedKnowledge = cleanedKnowledge.trim();
+        
+        console.log(`[${req.customerKey}] Cleaned knowledge: ${cleanedKnowledge.length} chars (removed ${knowledge.length - cleanedKnowledge.length} invalid chars)`);
+        
         // Save knowledge to database (PERMANENT STORAGE!)
         await pool.query(
             'UPDATE customers SET knowledge = $1, updated_at = CURRENT_TIMESTAMP WHERE customer_key = $2',
-            [knowledge, req.customerKey]
+            [cleanedKnowledge, req.customerKey]
         );
         
         console.log(`[${req.customerKey}] ✅ Knowledge saved to database (PERMANENT)`);
@@ -292,12 +306,14 @@ app.post('/api/upload-knowledge', checkCustomer, async (req, res) => {
         res.json({ 
             success: true, 
             message: 'Knowledge uploaded successfully and saved permanently',
-            knowledgeLength: knowledge.length
+            knowledgeLength: cleanedKnowledge.length,
+            originalLength: knowledge.length,
+            cleaned: knowledge.length !== cleanedKnowledge.length
         });
         
     } catch (error) {
         console.error('Upload error:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ error: 'Internal server error', details: error.message });
     }
 });
 
