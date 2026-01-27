@@ -1,109 +1,171 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const { Pool } = require('pg');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware - CORS configuration
+// ==================== POSTGRESQL CONNECTION ====================
+// Railway otomatik olarak DATABASE_URL environment variable'ını ekler
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DATABASE_URL ? {
+        rejectUnauthorized: false
+    } : false
+});
+
+// Test database connection
+pool.query('SELECT NOW()', (err, res) => {
+    if (err) {
+        console.error('❌ Database connection error:', err);
+    } else {
+        console.log('✅ Database connected:', res.rows[0].now);
+    }
+});
+
+// ==================== DATABASE INITIALIZATION ====================
+async function initDatabase() {
+    try {
+        // Create customers table if not exists
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS customers (
+                id SERIAL PRIMARY KEY,
+                customer_key VARCHAR(255) UNIQUE NOT NULL,
+                name VARCHAR(255) NOT NULL,
+                allowed_domain VARCHAR(255),
+                limit_count INTEGER DEFAULT 10000,
+                used_count INTEGER DEFAULT 0,
+                active BOOLEAN DEFAULT true,
+                knowledge TEXT DEFAULT '',
+                search_api_key TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        
+        console.log('✅ Database tables initialized');
+        
+        // Insert default customers if they don't exist
+        await insertDefaultCustomers();
+        
+    } catch (error) {
+        console.error('❌ Database initialization error:', error);
+    }
+}
+
+async function insertDefaultCustomers() {
+    const defaultCustomers = [
+        {
+            customer_key: 'dvdcoin-demo',
+            name: 'DVD Coin (Demo)',
+            allowed_domain: 'dvdcoin.io',
+            limit_count: 10000
+        },
+        {
+            customer_key: 'customer-test',
+            name: 'Test Customer',
+            allowed_domain: 'localhost',
+            limit_count: 1000
+        }
+    ];
+    
+    for (const customer of defaultCustomers) {
+        try {
+            await pool.query(`
+                INSERT INTO customers (customer_key, name, allowed_domain, limit_count)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (customer_key) DO NOTHING
+            `, [customer.customer_key, customer.name, customer.allowed_domain, customer.limit_count]);
+            
+            console.log(`✅ Customer initialized: ${customer.customer_key}`);
+        } catch (error) {
+            console.error(`Error initializing customer ${customer.customer_key}:`, error);
+        }
+    }
+}
+
+// Initialize database on startup
+initDatabase();
+
+// ==================== MIDDLEWARE ====================
 app.use(cors({
-    origin: '*', // Allow all origins
+    origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'x-customer-key'],
     credentials: true
 }));
-app.use(express.json());
-
-// Handle preflight requests
+app.use(express.json({ limit: '10mb' })); // Increase limit for large PDFs
 app.options('*', cors());
 
-// ==================== CUSTOMER DATABASE ====================
-// Her müşteri için ayrı key ve limit
-// searchApiKey'i Railway'den eklemek için:
-// 1. CUSTOMERS objesi içinde ilgili customer'ın searchApiKey'ini güncelle
-// 2. Deploy et
-// Örnek: 'dvdcoin-demo': { ..., searchApiKey: 'your-api-key-here' }
-const CUSTOMERS = {
-    'dvdcoin-demo': {
-        name: 'DVD Coin (Demo)',
-        allowedDomain: 'dvdcoin.io',
-        limit: 10000,
-        used: 0,
-        active: true,
-        knowledge: '', // ← COMPANY KNOWLEDGE (PDF/TXT içeriği)
-        searchApiKey: '' // ← REAL-TIME SEARCH API KEY (Railway'den ekle)
-    },
-    'customer-test': {
-        name: 'Test Customer',
-        allowedDomain: 'localhost',
-        limit: 1000,
-        used: 0,
-        active: true,
-        knowledge: '',
-        searchApiKey: ''
-    }
-    // Buraya yeni müşteriler ekleyebilirsin
-};
-
 // ==================== CUSTOMER CHECK MIDDLEWARE ====================
-function checkCustomer(req, res, next) {
+async function checkCustomer(req, res, next) {
     const customerKey = req.body.customerKey || req.headers['x-customer-key'];
     
     if (!customerKey) {
         return res.status(401).json({ error: 'Customer key required' });
     }
     
-    const customer = CUSTOMERS[customerKey];
-    
-    if (!customer) {
-        return res.status(403).json({ error: 'Invalid customer key' });
-    }
-    
-    if (!customer.active) {
-        return res.status(403).json({ error: 'Customer account inactive' });
-    }
-    
-    if (customer.used >= customer.limit) {
-        return res.status(429).json({ error: 'Monthly limit exceeded. Please upgrade your plan.' });
-    }
-    
-    req.customer = customer;
-    
-    // ==================== DOMAIN CHECK ====================
-    if (customer.allowedDomain) {
-        const origin = req.headers.origin || req.headers.referer || '';
-        let requestDomain = '';
+    try {
+        // Get customer from database
+        const result = await pool.query(
+            'SELECT * FROM customers WHERE customer_key = $1',
+            [customerKey]
+        );
         
-        try {
-            if (origin) {
-                const url = new URL(origin);
-                requestDomain = url.hostname;
+        if (result.rows.length === 0) {
+            return res.status(403).json({ error: 'Invalid customer key' });
+        }
+        
+        const customer = result.rows[0];
+        
+        if (!customer.active) {
+            return res.status(403).json({ error: 'Customer account inactive' });
+        }
+        
+        if (customer.used_count >= customer.limit_count) {
+            return res.status(429).json({ error: 'Monthly limit exceeded. Please upgrade your plan.' });
+        }
+        
+        // Domain check
+        if (customer.allowed_domain) {
+            const origin = req.headers.origin || req.headers.referer || '';
+            let requestDomain = '';
+            
+            try {
+                if (origin) {
+                    const url = new URL(origin);
+                    requestDomain = url.hostname;
+                }
+            } catch (e) {
+                console.log('Could not parse origin');
             }
-        } catch (e) {
-            console.log('Could not parse origin');
+            
+            const allowed = customer.allowed_domain;
+            const isAllowed = requestDomain === allowed || 
+                             requestDomain === 'www.' + allowed ||
+                             requestDomain.endsWith('.' + allowed) ||
+                             (allowed === 'localhost' && (requestDomain === 'localhost' || requestDomain === '127.0.0.1'));
+            
+            if (!isAllowed && requestDomain !== '') {
+                console.log(`[${customerKey}] ❌ Domain not allowed: ${requestDomain}`);
+                return res.status(403).json({ 
+                    error: 'Domain not authorized',
+                    domain: requestDomain
+                });
+            }
+            
+            console.log(`[${customerKey}] ✅ Domain authorized: ${requestDomain}`);
         }
         
-        // Check domain
-        const allowed = customer.allowedDomain;
-        const isAllowed = requestDomain === allowed || 
-                         requestDomain === 'www.' + allowed ||
-                         requestDomain.endsWith('.' + allowed) ||
-                         (allowed === 'localhost' && (requestDomain === 'localhost' || requestDomain === '127.0.0.1'));
+        req.customer = customer;
+        req.customerKey = customerKey;
+        next();
         
-        if (!isAllowed && requestDomain !== '') {
-            console.log(`[${customerKey}] ❌ Domain not allowed: ${requestDomain}`);
-            console.log(`[${customerKey}] ✅ Allowed domain: ${allowed}`);
-            return res.status(403).json({ 
-                error: 'Domain not authorized',
-                domain: requestDomain
-            });
-        }
-        
-        console.log(`[${customerKey}] ✅ Domain authorized: ${requestDomain}`);
+    } catch (error) {
+        console.error('Customer check error:', error);
+        res.status(500).json({ error: 'Database error' });
     }
-
-    req.customerKey = customerKey;
-    next();
 }
 
 // ==================== CHAT ENDPOINT ====================
@@ -113,10 +175,9 @@ app.post('/api/chat', checkCustomer, async (req, res) => {
         
         console.log(`[${req.customerKey}] Chat request - Messages: ${messages.length}`);
         
-        // Müşterinin knowledge'ını ekle (varsa)
+        // Add customer knowledge if exists
         let messagesWithKnowledge = [...messages];
         if (req.customer.knowledge && req.customer.knowledge.trim()) {
-            // System prompt'tan sonra, user mesajlarından önce knowledge ekle
             messagesWithKnowledge.splice(1, 0, {
                 role: 'system',
                 content: `IMPORTANT COMPANY KNOWLEDGE - Use this to answer questions:\n\n${req.customer.knowledge}`
@@ -144,10 +205,16 @@ app.post('/api/chat', checkCustomer, async (req, res) => {
         
         const result = await response.json();
         
-        // Kullanımı kaydet
-        CUSTOMERS[req.customerKey].used++;
+        // Increment usage counter in database
+        await pool.query(
+            'UPDATE customers SET used_count = used_count + 1, updated_at = CURRENT_TIMESTAMP WHERE customer_key = $1',
+            [req.customerKey]
+        );
         
-        console.log(`[${req.customerKey}] Chat success - Usage: ${CUSTOMERS[req.customerKey].used}/${CUSTOMERS[req.customerKey].limit}`);
+        // Update local customer object
+        req.customer.used_count++;
+        
+        console.log(`[${req.customerKey}] Chat success - Usage: ${req.customer.used_count}/${req.customer.limit_count}`);
         
         res.json(result);
         
@@ -164,7 +231,6 @@ app.post('/api/tts', checkCustomer, async (req, res) => {
         
         console.log(`[${req.customerKey}] TTS request - Voice:`, voice?.name);
         
-        // Check if Google TTS key exists
         if (!process.env.GOOGLE_TTS_KEY) {
             console.error('GOOGLE_TTS_KEY not set in environment!');
             return res.status(500).json({ error: 'TTS service not configured' });
@@ -209,21 +275,23 @@ app.post('/api/upload-knowledge', checkCustomer, async (req, res) => {
     try {
         const { knowledge, adminPassword } = req.body;
         
-        // Admin password kontrolü (her müşteri kendi widget password'ünü kullanır)
         if (!adminPassword) {
             return res.status(401).json({ error: 'Admin password required' });
         }
         
         console.log(`[${req.customerKey}] Knowledge upload request - ${knowledge.length} chars`);
         
-        // Knowledge'ı kaydet
-        CUSTOMERS[req.customerKey].knowledge = knowledge;
+        // Save knowledge to database (PERMANENT STORAGE!)
+        await pool.query(
+            'UPDATE customers SET knowledge = $1, updated_at = CURRENT_TIMESTAMP WHERE customer_key = $2',
+            [knowledge, req.customerKey]
+        );
         
-        console.log(`[${req.customerKey}] Knowledge updated successfully`);
+        console.log(`[${req.customerKey}] ✅ Knowledge saved to database (PERMANENT)`);
         
         res.json({ 
             success: true, 
-            message: 'Knowledge uploaded successfully',
+            message: 'Knowledge uploaded successfully and saved permanently',
             knowledgeLength: knowledge.length
         });
         
@@ -236,9 +304,16 @@ app.post('/api/upload-knowledge', checkCustomer, async (req, res) => {
 // ==================== GET KNOWLEDGE ENDPOINT ====================
 app.get('/api/get-knowledge', checkCustomer, async (req, res) => {
     try {
+        const result = await pool.query(
+            'SELECT knowledge FROM customers WHERE customer_key = $1',
+            [req.customerKey]
+        );
+        
+        const knowledge = result.rows[0]?.knowledge || '';
+        
         res.json({ 
-            knowledge: CUSTOMERS[req.customerKey].knowledge || '',
-            knowledgeLength: (CUSTOMERS[req.customerKey].knowledge || '').length
+            knowledge: knowledge,
+            knowledgeLength: knowledge.length
         });
     } catch (error) {
         console.error('Get knowledge error:', error);
@@ -251,21 +326,18 @@ app.post('/api/search', checkCustomer, async (req, res) => {
     try {
         const { query } = req.body;
         
-        // Check if customer has search API key
-        if (!req.customer.searchApiKey || req.customer.searchApiKey.trim() === '') {
+        if (!req.customer.search_api_key || req.customer.search_api_key.trim() === '') {
             return res.status(400).json({ 
-                error: 'Real-time search is not available. Please add a search API key to your Railway configuration.',
+                error: 'Real-time search is not available. Please add a search API key.',
                 available: false
             });
         }
         
         console.log(`[${req.customerKey}] Search request: ${query}`);
         
-        // Example: Brave Search API (you can replace with any search API)
-        // For now, just return a message
         res.json({
             available: true,
-            message: 'Search feature is configured. Add your preferred search API implementation here.',
+            message: 'Search feature configured',
             query: query
         });
         
@@ -276,34 +348,85 @@ app.post('/api/search', checkCustomer, async (req, res) => {
 });
 
 // ==================== USAGE STATS ENDPOINT ====================
-app.get('/api/stats/:customerKey', (req, res) => {
-    const customer = CUSTOMERS[req.params.customerKey];
-    
-    if (!customer) {
-        return res.status(404).json({ error: 'Customer not found' });
+app.get('/api/stats/:customerKey', async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM customers WHERE customer_key = $1',
+            [req.params.customerKey]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Customer not found' });
+        }
+        
+        const customer = result.rows[0];
+        
+        res.json({
+            name: customer.name,
+            used: customer.used_count,
+            limit: customer.limit_count,
+            remaining: customer.limit_count - customer.used_count,
+            active: customer.active,
+            knowledgeSize: customer.knowledge?.length || 0
+        });
+    } catch (error) {
+        console.error('Stats error:', error);
+        res.status(500).json({ error: 'Internal server error' });
     }
-    
-    res.json({
-        name: customer.name,
-        used: customer.used,
-        limit: customer.limit,
-        remaining: customer.limit - customer.used,
-        active: customer.active
-    });
+});
+
+// ==================== ADMIN: ADD CUSTOMER ====================
+app.post('/api/admin/add-customer', async (req, res) => {
+    try {
+        const { adminKey, customerKey, name, allowedDomain, limit } = req.body;
+        
+        // Simple admin key check (you can change this)
+        if (adminKey !== process.env.ADMIN_KEY) {
+            return res.status(403).json({ error: 'Invalid admin key' });
+        }
+        
+        await pool.query(`
+            INSERT INTO customers (customer_key, name, allowed_domain, limit_count)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (customer_key) DO UPDATE
+            SET name = $2, allowed_domain = $3, limit_count = $4
+        `, [customerKey, name, allowedDomain, limit]);
+        
+        console.log(`✅ Customer added/updated: ${customerKey}`);
+        
+        res.json({ success: true, message: 'Customer added successfully' });
+        
+    } catch (error) {
+        console.error('Add customer error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 // ==================== HEALTH CHECK ====================
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'OK',
-        timestamp: new Date().toISOString(),
-        customers: Object.keys(CUSTOMERS).length
-    });
+app.get('/health', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT COUNT(*) FROM customers');
+        const customerCount = result.rows[0].count;
+        
+        res.json({ 
+            status: 'OK',
+            timestamp: new Date().toISOString(),
+            database: 'Connected',
+            customers: parseInt(customerCount)
+        });
+    } catch (error) {
+        res.status(500).json({
+            status: 'ERROR',
+            timestamp: new Date().toISOString(),
+            database: 'Disconnected',
+            error: error.message
+        });
+    }
 });
 
 // ==================== START SERVER ====================
 app.listen(PORT, () => {
     console.log(`🚀 Widget API Server running on port ${PORT}`);
-    console.log(`📊 Active customers: ${Object.keys(CUSTOMERS).length}`);
+    console.log(`📊 Database: PostgreSQL (Railway)`);
     console.log(`✅ Ready to serve requests!`);
 });
