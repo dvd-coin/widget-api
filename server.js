@@ -60,7 +60,7 @@ async function insertDefaultCustomers() {
             customer_key: 'dvdcoin-demo',
             name: 'DVD Coin (Demo)',
             allowed_domain: 'dvdcoin.io',
-            limit_count: 10000
+            limit_count: 1000
         },
         {
             customer_key: 'customer-test',
